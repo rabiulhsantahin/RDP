@@ -1,0 +1,125 @@
+name: Windows 11 + Google Remote Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      google_account_email:
+        description: 'Google account email for Remote Desktop'
+        required: true
+        type: string
+
+jobs:
+  google-remote-desktop:
+    runs-on: windows-2022
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure Remote Desktop Settings
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' -Value 1 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' -Value 2 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-GoogleRemoteDesktop" 2>$null
+          netsh advfirewall firewall add rule name="RDP-GoogleRemoteDesktop" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
+          Write-Host '✅ Remote Desktop enabled'
+
+      - name: Create Local RDP User
+        shell: powershell
+        run: |
+          $password = "GoogleRD@$(Get-Date -Format 'yyyyMMdd')!$([System.Guid]::NewGuid().ToString().Substring(0,6))"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name 'RemoteUser' -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name 'RemoteUser' -Password $securePass -PasswordNeverExpires -AccountNeverExpires
+            Write-Host '✅ Local user RemoteUser created'
+          }
+
+          Add-LocalGroupMember -Group 'Administrators' -Member 'RemoteUser' -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'RemoteUser' -ErrorAction SilentlyContinue
+
+          "RDP_USERNAME=RemoteUser" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Username: RemoteUser"
+          Write-Host "Password: $password"
+
+      - name: Install Google Chrome Remote Desktop Host
+        shell: powershell
+        run: |
+          $url = 'https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi'
+          $path = "$env:TEMP\chromeremotedesktophost.msi"
+
+          Write-Host 'Downloading Chrome Remote Desktop installer...'
+          Invoke-WebRequest -Uri $url -OutFile $path -UseBasicParsing
+
+          Write-Host 'Installing Chrome Remote Desktop...'
+          Start-Process msiexec.exe -ArgumentList '/i', "`"$path`"", '/quiet', '/norestart' -Wait -NoNewWindow
+
+          Remove-Item $path -Force -ErrorAction SilentlyContinue
+          Write-Host '✅ Chrome Remote Desktop host installed'
+
+      - name: Start Chrome Remote Desktop Service
+        shell: powershell
+        run: |
+          $service = Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue
+          if ($service) {
+            Start-Service -Name 'chromoting' -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 10
+          }
+
+          $status = Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue
+          if ($status -and $status.Status -eq 'Running') {
+            Write-Host '✅ Chrome Remote Desktop service is running'
+          } else {
+            Write-Warning 'Chrome Remote Desktop service did not start automatically; account linking still needs to be completed in the browser.'
+          }
+
+      - name: Show Setup Instructions
+        shell: powershell
+        run: |
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'Google Remote Desktop Setup'
+          Write-Host '========================================'
+          Write-Host "Google account: ${{ inputs.google_account_email }}"
+          Write-Host 'Windows username: RemoteUser'
+          Write-Host "Windows password: $env:RDP_PASSWORD"
+          Write-Host ''
+          Write-Host '1. Open: https://remotedesktop.google.com'
+          Write-Host "2. Sign in with: ${{ inputs.google_account_email }}"
+          Write-Host '3. Click Set up or My Computers'
+          Write-Host '4. Link this machine to your Google account'
+          Write-Host '5. Use RemoteUser and the generated password when prompted'
+          Write-Host '========================================'
+
+      - name: Optional Bootstrap Download
+        shell: powershell
+        run: |
+          $downloadUrl = 'https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat'
+          $downloadPath = 'C:\Downloads.bat'
+
+          try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+            Write-Host '✅ Optional startup script downloaded'
+          }
+          catch {
+            Write-Host "⚠️ Optional startup script could not be downloaded: $($_.Exception.Message)"
+          }
+
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host 'Remote Desktop session active...'
+          while ($true) {
+            Start-Sleep -Seconds 300
+          }
